@@ -42,10 +42,11 @@ describe('commissionBodySchema (commission creation)', () => {
     expect(parsed.description).toBe('A painted cover.');
   });
 
-  it('strips unknown keys so the client id can only come from the token', () => {
-    const parsed = commissionBodySchema.parse({ ...valid, clientId: CLIENT_ID });
+  it('rejects unknown keys so the client id can only come from the token', () => {
+    const result = commissionBodySchema.safeParse({ ...valid, clientId: CLIENT_ID });
 
-    expect(parsed).not.toHaveProperty('clientId');
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0]?.code).toBe('unrecognized_keys');
   });
 
   it('requires a UUID artist', () => {

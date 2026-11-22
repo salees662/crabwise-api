@@ -3,7 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const MEDIA_ID = 'media-1';
 const USER_ID = 'user-1';
 
-const { prismaMock, envMock, enqueueMock, objectExistsMock, s3UploadMock, s3DownloadMock, s3DeleteMock } = vi.hoisted(() => ({
+const {
+  prismaMock,
+  envMock,
+  enqueueMock,
+  objectExistsMock,
+  createPresignedMock,
+  s3UploadMock,
+  s3DownloadMock,
+  s3DeleteMock,
+} = vi.hoisted(() => ({
   prismaMock: {
     media: {
       findUnique: vi.fn(),
@@ -23,6 +32,7 @@ const { prismaMock, envMock, enqueueMock, objectExistsMock, s3UploadMock, s3Down
   },
   enqueueMock: vi.fn(),
   objectExistsMock: vi.fn(),
+  createPresignedMock: vi.fn(),
   s3UploadMock: vi.fn(),
   s3DownloadMock: vi.fn(),
   s3DeleteMock: vi.fn(),
@@ -36,7 +46,7 @@ vi.mock('./s3.service', () => ({
     (userId: string, folder: string, name: string) => `${folder}/${userId}/${name}`,
   ),
   buildPublicUrl: vi.fn((key: string) => `https://cdn/${key}`),
-  createPresignedUploadUrl: vi.fn(),
+  createPresignedUploadUrl: createPresignedMock,
   objectExists: objectExistsMock,
   downloadObjectBuffer: s3DownloadMock,
   uploadObjectBuffer: s3UploadMock,
@@ -53,10 +63,20 @@ vi.mock('sharp', () => ({
   })),
 }));
 
-import { confirmMediaUpload, getMediaRecord } from './media.service';
-import { confirmMediaUpload, deleteMedia } from './media.service';
+import {
+  confirmMediaUpload,
+  deleteMedia,
+  getMediaRecord,
+  presignMediaUpload,
+} from './media.service';
 import { processImage } from '../workers/media.worker';
-import { presignUploadSchema, MAX_IMAGE_SIZE_BYTES, MAX_DIGITAL_FILE_SIZE_BYTES } from '../validators/media.schemas';
+import {
+  ALLOWED_DIGITAL_FILE_MIME_TYPES,
+  ALLOWED_IMAGE_MIME_TYPES,
+  MAX_DIGITAL_FILE_SIZE_BYTES,
+  MAX_IMAGE_SIZE_BYTES,
+  presignUploadSchema,
+} from '../validators/media.schemas';
 import type { Job } from 'bullmq';
 import type { ImageProcessingJobData } from '../queues/media.queue';
 
@@ -92,11 +112,92 @@ beforeEach(() => {
   envMock.verifyS3Upload = undefined;
   prismaMock.media.findUnique.mockResolvedValue(makeMedia());
   prismaMock.media.findMany.mockResolvedValue([]);
-  prismaMock.media.create.mockResolvedValue({});
+  prismaMock.media.create.mockResolvedValue({ id: MEDIA_ID });
   enqueueMock.mockResolvedValue(undefined);
   objectExistsMock.mockResolvedValue(true);
+  createPresignedMock.mockResolvedValue('https://s3/upload');
   s3DownloadMock.mockResolvedValue(Buffer.from('original-image'));
   s3UploadMock.mockResolvedValue(undefined);
+});
+
+describe('presignMediaUpload service validation', () => {
+  it.each([
+    ...ALLOWED_IMAGE_MIME_TYPES.map((mimeType) => ['IMAGE', mimeType] as const),
+    ...ALLOWED_DIGITAL_FILE_MIME_TYPES.map((mimeType) => ['DIGITAL_FILE', mimeType] as const),
+  ])('accepts the supported %s MIME type %s', async (type, mimeType) => {
+    const result = await presignMediaUpload(USER_ID, {
+      type,
+      mimeType,
+      filename: 'file',
+      size: 1024,
+    });
+
+    expect(result.mediaId).toBe(MEDIA_ID);
+    expect(createPresignedMock).toHaveBeenCalledWith(expect.any(String), mimeType);
+  });
+
+  it.each([
+    ['IMAGE', 'image/jpeg; charset=utf-8'],
+    ['IMAGE', 'image/jpe'],
+    ['IMAGE', 'text/image/jpeg'],
+    ['IMAGE', ' image/jpeg'],
+    ['IMAGE', 'application/pdf'],
+    ['DIGITAL_FILE', 'application/pdf; charset=utf-8'],
+    ['DIGITAL_FILE', 'image/jpeg'],
+  ] as const)(
+    'rejects unsupported or malformed %s MIME type %s before writing metadata',
+    async (type, mimeType) => {
+      await expect(
+        presignMediaUpload(USER_ID, {
+          type,
+          mimeType,
+          filename: 'file',
+          size: 1024,
+        }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+
+      expect(prismaMock.media.create).not.toHaveBeenCalled();
+      expect(createPresignedMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['IMAGE', 'image/jpeg', MAX_IMAGE_SIZE_BYTES],
+    ['DIGITAL_FILE', 'application/pdf', MAX_DIGITAL_FILE_SIZE_BYTES],
+  ] as const)('accepts a %s upload at its exact size limit', async (type, mimeType, size) => {
+    await expect(
+      presignMediaUpload(USER_ID, { type, mimeType, filename: 'file', size }),
+    ).resolves.toMatchObject({ mediaId: MEDIA_ID });
+  });
+
+  it.each([
+    ['IMAGE', 'image/jpeg', MAX_IMAGE_SIZE_BYTES + 1],
+    ['DIGITAL_FILE', 'application/pdf', MAX_DIGITAL_FILE_SIZE_BYTES + 1],
+  ] as const)(
+    'rejects a %s upload above its size limit before writing metadata',
+    async (type, mimeType, size) => {
+      await expect(
+        presignMediaUpload(USER_ID, { type, mimeType, filename: 'file', size }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+
+      expect(prismaMock.media.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not create media metadata when presigning fails', async () => {
+    createPresignedMock.mockRejectedValue(new Error('S3 signing failed'));
+
+    await expect(
+      presignMediaUpload(USER_ID, {
+        type: 'IMAGE',
+        mimeType: 'image/jpeg',
+        filename: 'file',
+        size: 1024,
+      }),
+    ).rejects.toThrow('S3 signing failed');
+
+    expect(prismaMock.media.create).not.toHaveBeenCalled();
+  });
 });
 
 describe('presignUploadSchema limits', () => {
@@ -120,8 +221,12 @@ describe('presignUploadSchema limits', () => {
 
   it('accepts a digital file exactly at its limit but rejects one byte over', () => {
     const digital = { ...base, type: 'DIGITAL_FILE' as const, mimeType: 'application/pdf' };
-    expect(presignUploadSchema.safeParse({ ...digital, size: MAX_DIGITAL_FILE_SIZE_BYTES }).success).toBe(true);
-    expect(presignUploadSchema.safeParse({ ...digital, size: MAX_DIGITAL_FILE_SIZE_BYTES + 1 }).success).toBe(false);
+    expect(
+      presignUploadSchema.safeParse({ ...digital, size: MAX_DIGITAL_FILE_SIZE_BYTES }).success,
+    ).toBe(true);
+    expect(
+      presignUploadSchema.safeParse({ ...digital, size: MAX_DIGITAL_FILE_SIZE_BYTES + 1 }).success,
+    ).toBe(false);
   });
 
   it('rejects zero and negative sizes', () => {
@@ -145,12 +250,16 @@ describe('presignUploadSchema limits', () => {
   });
 
   it('rejects filenames longer than 255 characters and empty filenames', () => {
-    expect(presignUploadSchema.safeParse({ ...base, filename: 'a'.repeat(256) }).success).toBe(false);
+    expect(presignUploadSchema.safeParse({ ...base, filename: 'a'.repeat(256) }).success).toBe(
+      false,
+    );
     expect(presignUploadSchema.safeParse({ ...base, filename: '   ' }).success).toBe(false);
   });
 
   it('accepts a filename of exactly 255 characters', () => {
-    expect(presignUploadSchema.safeParse({ ...base, filename: 'a'.repeat(255) }).success).toBe(true);
+    expect(presignUploadSchema.safeParse({ ...base, filename: 'a'.repeat(255) }).success).toBe(
+      true,
+    );
   });
 
   it('accepts omitted optional metadata (parentType and parentId)', () => {
@@ -209,6 +318,7 @@ describe('confirmMediaUpload S3 verification (#873)', () => {
       code: 'UNPROCESSABLE_ENTITY',
     });
     expect(enqueueMock).not.toHaveBeenCalled();
+    expect(prismaMock.media.deleteMany).toHaveBeenCalledWith({ where: { id: MEDIA_ID } });
   });
 
   it('defaults to verifying in production without an explicit override', async () => {

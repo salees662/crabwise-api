@@ -114,16 +114,18 @@ export const orderBodySchema = z.object({
 /** `POST /api/v1/orders/:id/payment-intent` (#764). */
 export const paymentParamsSchema = z.object({ id: uuidSchema });
 
-export const commissionBodySchema = z.object({
-  artistId: uuidSchema,
-  title: z.string().trim().min(1).max(200),
-  description: z.string().trim().min(1).max(5000),
-  budget: z.coerce.number().finite().positive(),
-  asset: assetSchema,
-  deadline: z.coerce.date().refine((value) => value.getTime() > Date.now(), {
-    message: 'Deadline must be in the future.',
-  }),
-});
+export const commissionBodySchema = z
+  .object({
+    artistId: uuidSchema,
+    title: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(5000),
+    budget: z.coerce.number().finite().positive(),
+    asset: assetSchema,
+    deadline: z.coerce.date().refine((value) => value.getTime() > Date.now(), {
+      message: 'Deadline must be in the future.',
+    }),
+  })
+  .strict();
 
 export const commissionStatusParamsSchema = z.object({ id: uuidSchema });
 
