@@ -5,8 +5,6 @@ node_modules/
 dist/
 
 # Environment — keep .env.example, ignore real secrets
-.env
-.env.*
 !.env.example
 
 # Logs
@@ -29,4 +27,4 @@ Thumbs.db
 
 # Editors
 .idea/
-.vscode/
+config.bat

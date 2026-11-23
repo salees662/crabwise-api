@@ -23,6 +23,7 @@ import {
   createPresignedUploadUrl,
   deleteObject,
   objectExists,
+  readObjectHead,
 } from './s3.service';
 
 export interface PresignUploadInput {
@@ -60,6 +61,8 @@ const MAGIC_SIGNATURES: Readonly<Record<string, readonly (readonly number[])[]>>
     [0x47, 0x49, 0x46, 0x38, 0x37, 0x61],
     [0x47, 0x49, 0x46, 0x38, 0x39, 0x61],
   ],
+  // WebP is RIFF....WEBP; the RIFF prefix alone is not sufficient, so the
+  // "WEBP" form type at offset 8 is also checked (see webpMatches below).
   'image/webp': [[0x52, 0x49, 0x46, 0x46]],
   'application/pdf': [[0x25, 0x50, 0x44, 0x46, 0x2d]],
   'application/zip': [[0x50, 0x4b, 0x03, 0x04]],
@@ -76,13 +79,25 @@ function bytesMatchSignature(bytes: Uint8Array, signatures: readonly (readonly n
   );
 }
 
+/** WebP requires both the RIFF container tag and the "WEBP" form type at offset 8. */
+function webpMatches(bytes: Uint8Array): boolean {
+  const webpTag = [0x57, 0x45, 0x42, 0x50];
+  return (
+    bytesMatchSignature(bytes, MAGIC_SIGNATURES['image/webp']!) &&
+    bytes.length >= 12 &&
+    webpTag.every((b, i) => bytes[8 + i] === b)
+  );
+}
+
 async function assertContentMatchesMime(key: string, mimeType: string): Promise<void> {
   const signatures = MAGIC_SIGNATURES[mimeType];
   if (signatures === undefined) {
     throw new AppError('UNPROCESSABLE_ENTITY', 'Media content could not be verified for this type');
   }
   const head = await readObjectHead(key, 16);
-  if (!bytesMatchSignature(head, signatures)) {
+  const matches =
+    mimeType === 'image/webp' ? webpMatches(head) : bytesMatchSignature(head, signatures);
+  if (!matches) {
     throw new AppError('UNPROCESSABLE_ENTITY', 'Uploaded file content does not match its declared type');
   }
 }
